@@ -64,14 +64,22 @@ class CallbackModule(CallbackBase):
             msg = 'included: %s for %s' % (result._task.args.get('_raw_params'), result._host.name)
             color = 'cyan'
         elif result._result.get('changed', False):
-            if result._task.delegate_to is not None:
-                msg = "changed: [%s -> %s]" % (result._host.get_name(), result._task.delegate_to)
+            if result._task.delegate_to is not None or result._task._local_action:
+                if result._task._local_action:
+                    target = 'localhost'
+                else:
+                    target = result._task.delegate_to
+                msg = "changed: [%s -> %s]" % (result._host.get_name(), target)
             else:
                 msg = "changed: [%s]" % result._host.get_name()
             color = 'yellow'
         else:
-            if result._task.delegate_to is not None:
-                msg = "ok: [%s -> %s]" % (result._host.get_name(), result._task.delegate_to)
+            if result._task.delegate_to is not None or result._task._local_action:
+                if result._task._local_action:
+                    target = 'localhost'
+                else:
+                    target = result._task.delegate_to
+                msg = "ok: [%s -> %s]" % (result._host.get_name(), target)
             else:
                 msg = "ok: [%s]" % result._host.get_name()
             color = 'green'
@@ -88,14 +96,21 @@ class CallbackModule(CallbackBase):
 
     def v2_runner_on_skipped(self, result):
         if C.DISPLAY_SKIPPED_HOSTS:
-            msg = "skipping: [%s]" % result._host.get_name()
-            if (self._display.verbosity > 0 or '_ansible_verbose_always' in result._result) and not '_ansible_verbose_override' in result._result:
-                msg += " => %s" % self._dump_results(result._result)
-            self._display.display(msg, color='cyan')
+            if result._task.loop and 'results' in result._result:
+                self._process_items(result)
+            else:
+                msg = "skipping: [%s]" % result._host.get_name()
+                if (self._display.verbosity > 0 or '_ansible_verbose_always' in result._result) and not '_ansible_verbose_override' in result._result:
+                    msg += " => %s" % self._dump_results(result._result)
+                self._display.display(msg, color='cyan')
 
     def v2_runner_on_unreachable(self, result):
-        if result._task.delegate_to:
-            self._display.display("fatal: [%s -> %s]: UNREACHABLE! => %s" % (result._host.get_name(), result._task.delegate_to, self._dump_results(result._result)), color='red')
+        if result._task.delegate_to or result._task._local_action:
+            if result._task._local_action:
+                target = 'localhost'
+            else:
+                target = result._task.delegate_to
+            self._display.display("fatal: [%s -> %s]: UNREACHABLE! => %s" % (result._host.get_name(), target, self._dump_results(result._result)), color='red')
         else:
             self._display.display("fatal: [%s]: UNREACHABLE! => %s" % (result._host.get_name(), self._dump_results(result._result)), color='red')
 
@@ -107,6 +122,10 @@ class CallbackModule(CallbackBase):
 
     def v2_playbook_on_task_start(self, task, is_conditional):
         self._display.banner("TASK [%s]" % task.get_name().strip())
+        if self._display.verbosity > 3:
+            path = task.get_path()
+            if path:
+                self._display.display("task path: %s" % path, color='dark gray')
 
     def v2_playbook_on_cleanup_task_start(self, task):
         self._display.banner("CLEANUP TASK [%s]" % task.get_name().strip())

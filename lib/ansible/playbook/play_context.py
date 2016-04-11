@@ -27,7 +27,6 @@ import re
 import string
 
 from six import iteritems, string_types
-from six.moves import range
 
 from ansible import constants as C
 from ansible.errors import AnsibleError
@@ -56,6 +55,7 @@ MAGIC_VARIABLE_MAPPING = dict(
    remote_addr      = ('ansible_ssh_host', 'ansible_host'),
    remote_user      = ('ansible_ssh_user', 'ansible_user'),
    port             = ('ansible_ssh_port', 'ansible_port'),
+   accelerate_port  = ('ansible_accelerate_port',),
    password         = ('ansible_ssh_pass', 'ansible_password'),
    private_key_file = ('ansible_ssh_private_key_file', 'ansible_private_key_file'),
    pipelining       = ('ansible_ssh_pipelining', 'ansible_pipelining'),
@@ -66,6 +66,10 @@ MAGIC_VARIABLE_MAPPING = dict(
    become_pass      = ('ansible_become_password','ansible_become_pass'),
    become_exe       = ('ansible_become_exe',),
    become_flags     = ('ansible_become_flags',),
+   ssh_common_args  = ('ansible_ssh_common_args',),
+   sftp_extra_args  = ('ansible_sftp_extra_args',),
+   scp_extra_args   = ('ansible_scp_extra_args',),
+   ssh_extra_args   = ('ansible_ssh_extra_args',),
    sudo             = ('ansible_sudo',),
    sudo_user        = ('ansible_sudo_user',),
    sudo_pass        = ('ansible_sudo_password', 'ansible_sudo_pass'),
@@ -139,9 +143,16 @@ class PlayContext(Base):
     _private_key_file = FieldAttribute(isa='string', default=C.DEFAULT_PRIVATE_KEY_FILE)
     _timeout          = FieldAttribute(isa='int', default=C.DEFAULT_TIMEOUT)
     _shell            = FieldAttribute(isa='string')
+    _ssh_args         = FieldAttribute(isa='string', default=C.ANSIBLE_SSH_ARGS)
+    _ssh_common_args  = FieldAttribute(isa='string')
+    _sftp_extra_args  = FieldAttribute(isa='string')
+    _scp_extra_args   = FieldAttribute(isa='string')
     _ssh_extra_args   = FieldAttribute(isa='string')
     _connection_lockfd= FieldAttribute(isa='int')
     _pipelining       = FieldAttribute(isa='bool', default=C.ANSIBLE_SSH_PIPELINING)
+    _accelerate       = FieldAttribute(isa='bool', default=False)
+    _accelerate_ipv6  = FieldAttribute(isa='bool', default=False, always_post_validate=True)
+    _accelerate_port  = FieldAttribute(isa='int', default=C.ACCELERATE_PORT, always_post_validate=True)
 
     # privilege escalation fields
     _become           = FieldAttribute(isa='bool')
@@ -199,6 +210,12 @@ class PlayContext(Base):
         the play class.
         '''
 
+        # special handling for accelerated mode, as it is set in a separate
+        # play option from the connection parameter
+        self.accelerate = play.accelerate
+        self.accelerate_ipv6 = play.accelerate_ipv6
+        self.accelerate_port = play.accelerate_port
+
         if play.connection:
             self.connection = play.connection
 
@@ -230,6 +247,9 @@ class PlayContext(Base):
 
         self.remote_user = options.remote_user
         self.private_key_file = options.private_key_file
+        self.ssh_common_args = options.ssh_common_args
+        self.sftp_extra_args = options.sftp_extra_args
+        self.scp_extra_args = options.scp_extra_args
         self.ssh_extra_args = options.ssh_extra_args
 
         # privilege escalation
@@ -329,11 +349,23 @@ class PlayContext(Base):
             elif new_info.become_method == 'su' and new_info.su_pass:
                setattr(new_info, 'become_pass', new_info.su_pass)
 
-
-        # finally, in the special instance that the task was specified
-        # as a local action, override the connection in case it was changed
-        # during some other step in the process
-        if task._local_action:
+        # special overrides for the connection setting
+        if len(delegated_vars) > 0:
+            # in the event that we were using local before make sure to reset the
+            # connection type to the default transport for the delegated-to host,
+            # if not otherwise specified
+            for connection_type in MAGIC_VARIABLE_MAPPING.get('connection'):
+                if connection_type in delegated_vars:
+                    break
+            else:
+                if new_info.remote_addr in C.LOCALHOST:
+                    setattr(new_info, 'connection', 'local')
+                elif getattr(new_info, 'connection', None) == 'local' and new_info.remote_addr not in C.LOCALHOST:
+                    setattr(new_info, 'connection', C.DEFAULT_TRANSPORT)
+        elif task._local_action:
+            # otherwise, in the special instance that the task was specified
+            # as a local action, override the connection in case it was changed
+            # during some other step in the process
             setattr(new_info, 'connection', 'local')
 
         # set no_log to default if it was not previouslly set

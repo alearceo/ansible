@@ -101,7 +101,8 @@ class PlaybookExecutor:
                             salt      = var.get("salt", None)
 
                             if vname not in play.vars:
-                                self._tqm.send_callback('v2_playbook_on_vars_prompt', vname, private, prompt, encrypt, confirm, salt_size, salt, default)
+                                if self._tqm:
+                                    self._tqm.send_callback('v2_playbook_on_vars_prompt', vname, private, prompt, encrypt, confirm, salt_size, salt, default)
                                 play.vars[vname] = self._do_var_prompt(vname, private, prompt, encrypt, confirm, salt_size, salt, default)
 
                     # Create a temporary copy of the play here, so we can run post_validate
@@ -185,21 +186,21 @@ class PlaybookExecutor:
         for h in hosts:
             t = self._tqm._stats.summarize(h)
 
-            self._display.display("%s : %s %s %s %s" % (
+            self._display.display(u"%s : %s %s %s %s" % (
                 hostcolor(h, t),
-                colorize('ok', t['ok'], 'green'),
-                colorize('changed', t['changed'], 'yellow'),
-                colorize('unreachable', t['unreachable'], 'red'),
-                colorize('failed', t['failures'], 'red')),
+                colorize(u'ok', t['ok'], 'green'),
+                colorize(u'changed', t['changed'], 'yellow'),
+                colorize(u'unreachable', t['unreachable'], 'red'),
+                colorize(u'failed', t['failures'], 'red')),
                 screen_only=True
             )
 
-            self._display.display("%s : %s %s %s %s" % (
+            self._display.display(u"%s : %s %s %s %s" % (
                 hostcolor(h, t, False),
-                colorize('ok', t['ok'], None),
-                colorize('changed', t['changed'], None),
-                colorize('unreachable', t['unreachable'], None),
-                colorize('failed', t['failures'], None)),
+                colorize(u'ok', t['ok'], None),
+                colorize(u'changed', t['changed'], None),
+                colorize(u'unreachable', t['unreachable'], None),
+                colorize(u'failed', t['failures'], None)),
                 log_only=True
             )
 

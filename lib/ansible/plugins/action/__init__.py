@@ -22,19 +22,19 @@ __metaclass__ = type
 import base64
 import json
 import os
+import pipes
 import random
 import stat
 import tempfile
 import time
 
-from six import string_types
-from six.moves import StringIO
+from six import binary_type, text_type, iteritems
 
 from ansible import constants as C
 from ansible.errors import AnsibleError, AnsibleConnectionFailure
 from ansible.executor.module_common import modify_module
 from ansible.parsing.utils.jsonify import jsonify
-from ansible.utils.unicode import to_bytes
+from ansible.utils.unicode import to_bytes, to_unicode
 
 try:
     from __main__ import display
@@ -187,21 +187,21 @@ class ActionBase:
             elif result['rc'] == 255 and self._connection.transport in ('ssh',):
 
                 if self._play_context.verbosity > 3:
-                    output = 'SSH encountered an unknown error. The output was:\n%s' % (result['stdout']+result['stderr'])
+                    output = u'SSH encountered an unknown error. The output was:\n%s%s' % (result['stdout'], result['stderr'])
                 else:
-                    output = 'SSH encountered an unknown error during the connection. We recommend you re-run the command using -vvvv, which will enable SSH debugging output to help diagnose the issue'
+                    output = u'SSH encountered an unknown error during the connection. We recommend you re-run the command using -vvvv, which will enable SSH debugging output to help diagnose the issue'
 
-            elif 'No space left on device' in result['stderr']:
+            elif u'No space left on device' in result['stderr']:
                 output = result['stderr']
             else:
                 output = 'Authentication or permission failure.  In some cases, you may have been able to authenticate and did not have permissions on the remote directory. Consider changing the remote temp path in ansible.cfg to a path rooted in "/tmp". Failed command was: %s, exited with result %d' % (cmd, result['rc'])
-            if 'stdout' in result and result['stdout'] != '':
-                output = output + ": %s" % result['stdout']
+            if 'stdout' in result and result['stdout'] != u'':
+                output = output + u": %s" % result['stdout']
             raise AnsibleConnectionFailure(output)
 
         # FIXME: do we still need to do this?
         #rc = self._connection._shell.join_path(utils.last_non_blank_line(result['stdout']).strip(), '')
-        rc = self._connection._shell.join_path(result['stdout'].strip(), '').splitlines()[-1]
+        rc = self._connection._shell.join_path(result['stdout'].strip(), u'').splitlines()[-1]
 
         # Catch failure conditions, files should never be
         # written to locations in /.
@@ -272,15 +272,15 @@ class ActionBase:
         self._display.debug("done getting the remote checksum")
         try:
             data2 = data['stdout'].strip().splitlines()[-1]
-            if data2 == '':
+            if data2 == u'':
                 # this may happen if the connection to the remote server
                 # failed, so just return "INVALIDCHECKSUM" to avoid errors
                 return "INVALIDCHECKSUM"
             else:
                 return data2.split()[0]
         except IndexError:
-            self._display.warning("Calculating checksum failed unusually, please report this to " + \
-                "the list so it can be fixed\ncommand: %s\n----\noutput: %s\n----\n" % (cmd, data))
+            self._display.warning(u"Calculating checksum failed unusually, please report this to "
+                u"the list so it can be fixed\ncommand: %s\n----\noutput: %s\n----\n" % (to_unicode(cmd), data))
             # this will signal that it changed and allow things to keep going
             return "INVALIDCHECKSUM"
 
@@ -321,14 +321,13 @@ class ActionBase:
         need to filter anything which starts not with '{', '[', ', '=' or is an empty line.
         filter only leading lines since multiline JSON is valid.
         '''
+        idx = 0
+        for line in data.splitlines(True):
+            if line.startswith((u'{', u'[')):
+                break
+            idx = idx + len(line)
 
-        filtered_lines = StringIO()
-        stop_filtering = False
-        for line in data.splitlines():
-            if stop_filtering or line.startswith('{') or line.startswith('['):
-                stop_filtering = True
-                filtered_lines.write(line + '\n')
-        return filtered_lines.getvalue()
+        return data[idx:]
 
     def _execute_module(self, module_name=None, module_args=None, tmp=None, task_vars=dict(), persist_files=False, delete_remote_tmp=True):
         '''
@@ -362,17 +361,26 @@ class ActionBase:
 
         # a remote tmp path may be necessary and not already created
         remote_module_path = None
+        args_file_path = None
         if not tmp and self._late_needs_tmp_path(tmp, module_style):
             tmp = self._make_tmp_path()
 
         if tmp:
             remote_module_path = self._connection._shell.join_path(tmp, module_name)
+            if module_style == 'old':
+                # we'll also need a temp file to hold our module arguments
+                args_file_path = self._connection._shell.join_path(tmp, 'args')
 
-        # FIXME: async stuff here?
-        #if (module_style != 'new' or async_jid is not None or not self._connection._has_pipelining or not self._play_context.pipelining or C.DEFAULT_KEEP_REMOTE_FILES):
-        if remote_module_path:
+        if remote_module_path or module_style != 'new':
             self._display.debug("transferring module to remote")
             self._transfer_data(remote_module_path, module_data)
+            if module_style == 'old':
+                # we need to dump the module args to a k=v string in a file on
+                # the remote system, which can be read and parsed by the module
+                args_data = ""
+                for k,v in iteritems(module_args):
+                    args_data += '%s="%s" ' % (k, pipes.quote(v))
+                self._transfer_data(args_file_path, args_data)
             self._display.debug("done transferring module to remote")
 
         environment_string = self._compute_environment_string()
@@ -384,9 +392,6 @@ class ActionBase:
         cmd = ""
         in_data = None
 
-        # FIXME: all of the old-module style and async stuff has been removed from here, and
-        #        might need to be re-added (unless we decide to drop support for old-style modules
-        #        at this point and rework things to support non-python modules specifically)
         if self._connection.has_pipelining and self._play_context.pipelining and not C.DEFAULT_KEEP_REMOTE_FILES:
             in_data = module_data
         else:
@@ -399,7 +404,7 @@ class ActionBase:
                 # not sudoing or sudoing to root, so can cleanup files in the same step
                 rm_tmp = tmp
 
-        cmd = self._connection._shell.build_module_command(environment_string, shebang, cmd, rm_tmp)
+        cmd = self._connection._shell.build_module_command(environment_string, shebang, cmd, arg_path=args_file_path, rm_tmp=rm_tmp)
         cmd = cmd.strip()
 
         sudoable = True
@@ -420,21 +425,21 @@ class ActionBase:
                 self._low_level_execute_command(cmd2, sudoable=False)
 
         try:
-            data = json.loads(self._filter_leading_non_json_lines(res.get('stdout', '')))
+            data = json.loads(self._filter_leading_non_json_lines(res.get('stdout', u'')))
         except ValueError:
             # not valid json, lets try to capture error
             data = dict(failed=True, parsed=False)
-            if 'stderr' in res and res['stderr'].startswith('Traceback'):
+            if 'stderr' in res and res['stderr'].startswith(u'Traceback'):
                 data['exception'] = res['stderr']
             else:
-                data['msg'] = res.get('stdout', '')
+                data['msg'] = res.get('stdout', u'')
                 if 'stderr' in res:
                     data['msg'] += res['stderr']
 
         # pre-split stdout into lines, if stdout is in the data and there
         # isn't already a stdout_lines value there
         if 'stdout' in data and 'stdout_lines' not in data:
-            data['stdout_lines'] = data.get('stdout', '').splitlines()
+            data['stdout_lines'] = data.get('stdout', u'').splitlines()
 
         # store the module invocation details back into the result
         if self._task.async != 0:
@@ -446,11 +451,20 @@ class ActionBase:
         self._display.debug("done with _execute_module (%s, %s)" % (module_name, module_args))
         return data
 
-    def _low_level_execute_command(self, cmd, sudoable=True, in_data=None, executable=None):
+    def _low_level_execute_command(self, cmd, sudoable=True, in_data=None,
+            executable=None, encoding_errors='replace'):
         '''
         This is the function which executes the low level shell command, which
         may be commands to create/remove directories for temporary files, or to
         run the module code or python directly when pipelining.
+
+        :kwarg encoding_errors: If the value returned by the command isn't
+            utf-8 then we have to figure out how to transform it to unicode.
+            If the value is just going to be displayed to the user (or
+            discarded) then the default of 'replace' is fine.  If the data is
+            used as a key or is going to be written back out to a file
+            verbatim, then this won't work.  May have to use some sort of
+            replacement strategy (python3 could use surrogateescape)
         '''
 
         if executable is not None:
@@ -472,13 +486,19 @@ class ActionBase:
         rc, stdout, stderr = self._connection.exec_command(cmd, in_data=in_data, sudoable=sudoable)
         self._display.debug("command execution done")
 
-        if not isinstance(stdout, string_types):
-            out = ''.join(stdout.readlines())
+        # stdout and stderr may be either a file-like or a bytes object.
+        # Convert either one to a text type
+        if isinstance(stdout, binary_type):
+            out = to_unicode(stdout, errors=encoding_errors)
+        elif not isinstance(stdout, text_type):
+            out = to_unicode(b''.join(stdout.readlines()), errors=encoding_errors)
         else:
             out = stdout
 
-        if not isinstance(stderr, string_types):
-            err = ''.join(stderr.readlines())
+        if isinstance(stderr, binary_type):
+            err = to_unicode(stderr, errors=encoding_errors)
+        elif not isinstance(stderr, text_type):
+            err = to_unicode(b''.join(stderr.readlines()), errors=encoding_errors)
         else:
             err = stderr
 
